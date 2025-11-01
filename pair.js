@@ -61,14 +61,14 @@ try {
                     const sessionGlobal = fs.readFileSync(dirs + '/creds.json', 'utf-8');
 
                     // Create session string with HORLAMHI prefix
-                    let stringSession = `HORLAMHI~${Buffer.from(sessionGlobal).toString('base64')}`;
+                    let stringSession = `${Buffer.from(sessionGlobal).toString('base64')}`;
 
                     // Send the session to the user
                     await Um4r719.sendMessage(Um4r719.user.id, { text: stringSession });
 
                     // Send confirmation message
                     await Um4r719.sendMessage(Um4r719.user.id, { 
-                        text: 'HORLAMHI Session has been successfully generated!\n\nYour session is above.\n\nGoodluck 🎉\n' 
+                        text: 'HORLA-POOKIE Session has been successfully generated!\n\nYour session is above.\n\nGoodluck 🎉\n' 
                     });
 
                     // Clean up session after use
