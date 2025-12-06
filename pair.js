@@ -97,7 +97,6 @@ router.get('/', async (req, res) => {
                         // Clean up session after use
                         await delay(2000);
                         removeFile(dirs);
-                        process.exit(0);
                     } catch (err) {
                         console.error('Error sending session:', err.message);
                         console.error('Stack:', err.stack);
@@ -105,7 +104,6 @@ router.get('/', async (req, res) => {
                             res.status(500).send({ error: 'Failed to send session: ' + err.message });
                         }
                         removeFile(dirs);
-                        process.exit(1);
                     }
                 } else if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -117,7 +115,6 @@ router.get('/', async (req, res) => {
                             res.status(401).send({ error: 'Device logged out or not authenticated' });
                         }
                         removeFile(dirs);
-                        process.exit(1);
                     } else if (statusCode !== 408) {
                         // Retry on other errors (not Request Timeout)
                         retryCount++;
@@ -131,7 +128,6 @@ router.get('/', async (req, res) => {
                                 res.status(500).send({ error: 'Unable to link device after multiple attempts' });
                             }
                             removeFile(dirs);
-                            process.exit(1);
                         }
                     }
                 }
