@@ -1,11 +1,19 @@
 import express from 'express';
 import fs from 'fs';
+import path from 'path';
 import pino from 'pino';
-import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, delay, Browsers } from '@whiskeysockets/baileys';
 
 const router = express.Router();
 
-// Ensure the session directory exists
+// Ensure directory exists
+function ensureDir(dirPath) {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+}
+
+// Remove file/directory
 function removeFile(FilePath) {
     try {
         if (!fs.existsSync(FilePath)) return false;
@@ -24,16 +32,26 @@ router.get('/', async (req, res) => {
         return res.status(400).send({ error: 'Phone number is required' });
     }
 
+    // Clean phone number
+    num = num.replace(/[^0-9]/g, '');
+
     // Remove existing session if present
-    await removeFile(dirs);
+    removeFile(dirs);
+    
+    // Create fresh directory
+    ensureDir(dirs);
+    console.log(`Created session directory: ${dirs}`);
 
     let retryCount = 0;
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 3;
+    let requestSent = false;
+    let sessionSent = false;
 
     // Enhanced session initialization function
     async function initiateSession() {
-        const { state, saveCreds } = await useMultiFileAuthState(dirs);
         try {
+            const { state, saveCreds } = await useMultiFileAuthState(dirs);
+            
             const Um4r719 = makeWASocket({
                 printQRInTerminal: false,
                 browser: Browsers.ubuntu('Chrome'),
@@ -41,82 +59,112 @@ router.get('/', async (req, res) => {
                     level: 'silent',
                 }),
                 auth: state,
-                syncFullHistory: true,
+                shouldSyncHistoryMessage: () => false,
             });
 
-            let codeSent = false;
-            let sessionSent = false;
+            // Handle credentials update
+            Um4r719.ev.on('creds.update', saveCreds);
 
-            Um4r719.ev.on('connection.update', async (s) => {
-                const { connection, lastDisconnect, qr } = s;
+            // Main connection handler
+            Um4r719.ev.on("connection.update", async (s) => {
+                const { connection, lastDisconnect } = s;
+                console.log('Connection status:', connection);
 
                 if (connection === "connecting") {
-                    console.log('Connecting...');
+                    console.log('Socket connecting...');
                 }
 
-                if (connection === "open" && !sessionSent) {
-                    console.log("Connection opened successfully");
-                    sessionSent = true;
+                if (connection === "open") {
+                    console.log("Socket connection opened successfully");
 
-                    // Wait for device to authenticate
-                    await delay(8000);
-
-                    try {
-                        console.log('Attempting to send session...');
-
-                        // Send initial message
-                        await Um4r719.sendMessage(Um4r719.user.id, { text: `Generating your session wait a moment` });
-                        console.log("Sent generation message");
-
-                        await delay(3000);
-
-                        // Read and encode credentials
-                        const credPath = dirs + '/creds.json';
-                        if (!fs.existsSync(credPath)) {
-                            console.error('Creds file not found at:', credPath);
-                            throw new Error('Credentials file not found');
+                    // Request pairing code only once
+                    if (!requestSent) {
+                        requestSent = true;
+                        try {
+                            console.log(`Requesting pairing code for: ${num}`);
+                            const code = await Um4r719.requestPairingCode(num);
+                            console.log(`Pairing code received: ${code}`);
+                            
+                            if (!res.headersSent) {
+                                res.send({ code });
+                            }
+                        } catch (err) {
+                            console.error('Error requesting pairing code:', err.message);
+                            if (!res.headersSent) {
+                                res.status(500).send({ error: 'Failed to get pairing code: ' + err.message });
+                            }
+                            removeFile(dirs);
+                            await Um4r719.end();
                         }
-
-                        const sessionGlobal = fs.readFileSync(credPath, 'utf-8');
-                        let stringSession = `${Buffer.from(sessionGlobal).toString('base64')}`;
-
-                        console.log('Session encoded, length:', stringSession.length);
-
-                        // Send the session to the user
-                        await Um4r719.sendMessage(Um4r719.user.id, { text: stringSession });
-                        console.log("Sent session base64");
-
-                        await delay(1000);
-
-                        // Send confirmation message
-                        await Um4r719.sendMessage(Um4r719.user.id, {
-                            text: 'HORLA-POOKIE Session has been successfully generated!\n\nYour session is above. Dont forget to give us a follow🙏🙏 https://whatsapp.com/channel/0029VbBu7CaLtOjAOyp5kR1i.\n\nGoodluck 🎉\n'
-                        });
-                        console.log("Sent confirmation message");
-
-                        // Clean up session after use
-                        await delay(2000);
-                        removeFile(dirs);
-                    } catch (err) {
-                        console.error('Error sending session:', err.message);
-                        console.error('Stack:', err.stack);
-                        if (!res.headersSent) {
-                            res.status(500).send({ error: 'Failed to send session: ' + err.message });
-                        }
-                        removeFile(dirs);
                     }
-                } else if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
 
-                    // 401 = LoggedOut, don't retry
+                    // Wait for device to complete pairing and login
+                    if (requestSent && !sessionSent) {
+                        await delay(15000); // Wait for user to enter code on device
+                        sessionSent = true;
+
+                        try {
+                            console.log('Attempting to send session...');
+                            
+                            // Send notification
+                            await Um4r719.sendMessage(Um4r719.user.id, { 
+                                text: `Generating your session wait a moment` 
+                            });
+                            console.log("Sent generation notification");
+                            
+                            await delay(5000);
+
+                            // Read credentials file
+                            const credPath = path.join(dirs, 'creds.json');
+                            if (!fs.existsSync(credPath)) {
+                                throw new Error('Credentials file not found at: ' + credPath);
+                            }
+
+                            const sessionGlobal = fs.readFileSync(credPath, 'utf-8');
+                            const stringSession = Buffer.from(sessionGlobal).toString('base64');
+
+                            console.log('Session encoded, length:', stringSession.length);
+
+                            // Send the base64 session
+                            await Um4r719.sendMessage(Um4r719.user.id, { text: stringSession });
+                            console.log("Sent session base64");
+
+                            await delay(1000);
+
+                            // Send confirmation
+                            await Um4r719.sendMessage(Um4r719.user.id, { 
+                                text: 'HORLA-POOKIE Session has been successfully generated!\n\nYour session is above. Dont forget to give us a follow🙏🙏 https://whatsapp.com/channel/0029VbBu7CaLtOjAOyp5kR1i.\n\nGoodluck 🎉\n' 
+                            });
+                            console.log("Sent confirmation message");
+
+                            // Clean up and close
+                            await delay(2000);
+                            removeFile(dirs);
+                            await Um4r719.end();
+                        } catch (err) {
+                            console.error('Error sending session:', err.message);
+                            if (!res.headersSent) {
+                                res.status(500).send({ error: 'Failed to send session: ' + err.message });
+                            }
+                            removeFile(dirs);
+                            await Um4r719.end();
+                        }
+                    }
+                } 
+                else if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    console.log('Connection closed with status:', statusCode);
+
+                    // 401 = LoggedOut, 428 = Connection error during pairing
                     if (statusCode === 401) {
-                        console.log('Device logged out');
+                        console.log('Device logged out or not authenticated');
                         if (!res.headersSent) {
-                            res.status(401).send({ error: 'Device logged out or not authenticated' });
+                            res.status(401).send({ error: 'Device not authenticated' });
                         }
                         removeFile(dirs);
-                    } else if (statusCode !== 408) {
-                        // Retry on other errors (not Request Timeout)
+                    } 
+                    else if (!requestSent && statusCode !== 408) {
+                        // Retry if we haven't sent the request yet
                         retryCount++;
                         if (retryCount < MAX_RETRIES) {
                             console.log(`Retrying connection... Attempt ${retryCount}/${MAX_RETRIES}`);
@@ -125,44 +173,19 @@ router.get('/', async (req, res) => {
                         } else {
                             console.log('Max retries reached');
                             if (!res.headersSent) {
-                                res.status(500).send({ error: 'Unable to link device after multiple attempts' });
+                                res.status(500).send({ error: 'Unable to connect after multiple attempts' });
                             }
                             removeFile(dirs);
                         }
                     }
                 }
             });
-
-            Um4r719.ev.on('creds.update', saveCreds);
-
-            // Request pairing code after socket is ready
-            Um4r719.ev.on('connection.update', async (s) => {
-                const { connection } = s;
-
-                if (connection === "connecting" && !codeSent) {
-                    await delay(3000);
-                    try {
-                        num = num.replace(/[^0-9]/g, '');
-                        const code = await Um4r719.requestPairingCode(num);
-                        console.log({ num, code });
-                        if (!res.headersSent) {
-                            res.send({ code });
-                        }
-                    } catch (err) {
-                        console.error('Error requesting pairing code:', err);
-                        if (!res.headersSent) {
-                            res.status(500).send({ error: 'Unable to generate pairing code: ' + err.message });
-                        }
-                    }
-                }
-            });
         } catch (err) {
-            console.error('Error initializing session:', err);
+            console.error('Error initializing session:', err.message);
             if (!res.headersSent) {
-                res.status(503).send({ error: 'Service Unavailable: ' + err.message });
+                res.status(503).send({ error: 'Service error: ' + err.message });
             }
             removeFile(dirs);
-            process.exit(1);
         }
     }
 
